@@ -21,7 +21,7 @@ import { getAgentGroupByFolder } from '../../src/db/agent-groups.js';
 import { getMessagingGroupByPlatform } from '../../src/db/messaging-groups.js';
 import { runMigrations } from '../../src/db/migrations/index.js';
 import '../../src/mailbox/compose.js';
-import { resolveSession, withMailboxSession } from '../../src/session-manager.js';
+import { resolveTaskSession, withMailboxSession } from '../../src/session-manager.js';
 import { readEnvFile } from '../../src/env.js';
 import { buildDiscordResolver, type DiscordResolver } from './discord-resolver.js';
 import { parseJid, v2PlatformId } from './shared.js';
@@ -151,7 +151,13 @@ async function main(): Promise<void> {
         continue;
       }
 
-      const { session } = await resolveSession(ag.id, mg.id, null, 'shared');
+      // Tasks fire into their own isolated system:tasks:<series> session, never
+      // the chat session (nanocoai/nanoclaw#3301) — writing a task row into the
+      // 'shared' chat session here was the actual source of "every legacy
+      // series" landing in one-door task mode on a migrated install: it put
+      // the row where its live replies get dropped, its run log stops
+      // recording, and `tasks list/get/cancel` can't see it at all.
+      const { session } = await resolveTaskSession(ag.id, t.id);
       const inserted = await withMailboxSession(ag.id, session.id, async (mailbox) => {
         if (mailbox.getTask(t.id)) return false;
         await mailbox.insertMessage({
@@ -160,8 +166,8 @@ async function main(): Promise<void> {
           timestamp: new Date().toISOString(),
           processAfter: scheduling.processAfter,
           recurrence: scheduling.recurrence,
-          platformId,
-          channelType: parsed.channel_type,
+          platformId: null,
+          channelType: null,
           threadId: null,
           content: JSON.stringify({
             prompt: t.prompt,
