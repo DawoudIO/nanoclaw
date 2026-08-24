@@ -128,11 +128,16 @@ function saveState(state: UpdateState): void {
 }
 
 export function loadState(projectRoot: string, id: string): UpdateState {
-  const expectedTransactionRoot = path.join(defaultTransactionsRoot(path.resolve(projectRoot)), id);
+  // realpath, matching prepareUpdate's own normalization of options.projectRoot
+  // — callers may pass a symlinked path (e.g. macOS /tmp -> /private/tmp), and
+  // comparing that raw string against the realpath'd value saveState wrote
+  // makes an otherwise-valid state look "mismatched or unsafe".
+  const resolvedProjectRoot = fs.realpathSync(projectRoot);
+  const expectedTransactionRoot = path.join(defaultTransactionsRoot(resolvedProjectRoot), id);
   const target = statePath(expectedTransactionRoot);
   const state = JSON.parse(fs.readFileSync(target, 'utf8')) as UpdateState;
   if (state.schema !== 'nanoclaw-update/v1') throw new Error(`Unsupported update state in ${target}`);
-  if (!hasSafeStatePaths(state, projectRoot, expectedTransactionRoot, id)) {
+  if (!hasSafeStatePaths(state, resolvedProjectRoot, expectedTransactionRoot, id)) {
     throw new Error('Update state contains mismatched or unsafe paths');
   }
   return state;
@@ -236,7 +241,12 @@ export function prepareUpdate(options: PrepareOptions, runtime = createUpdateRun
 
   fs.mkdirSync(transactionRoot, { recursive: true });
   git(runtime, projectRoot, ['branch', backupBranch, originalHead]);
-  git(runtime, projectRoot, ['tag', backupTag, originalHead]);
+  // --no-sign: this is an internal, ephemeral bookkeeping tag (deleted once
+  // the transaction completes or rolls back, never pushed) — it must not
+  // inherit a global tag.gpgsign=true, which otherwise turns this lightweight
+  // tag into an annotated one and fails non-interactively with "no tag
+  // message?" since nothing here ever supplies -m.
+  git(runtime, projectRoot, ['tag', '--no-sign', backupTag, originalHead]);
   git(runtime, projectRoot, ['worktree', 'add', '-b', stageBranch, stageRoot, originalHead]);
 
   const state: UpdateState = {
