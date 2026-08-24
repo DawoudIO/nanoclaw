@@ -8,6 +8,7 @@ import {
   findTaskSessions,
   getActiveSessions,
   getSession,
+  getSessionsByAgentGroup,
   isTaskThread,
   taskThreadId,
   TASKS_SYSTEM_THREAD_ID,
@@ -24,7 +25,12 @@ import {
   type ScheduledTaskRow,
   validateRecurrence,
 } from '../../modules/scheduling/create.js';
-import { destroySessionMailbox, sessionDir, withExistingMailboxSession } from '../../session-manager.js';
+import {
+  destroySessionMailbox,
+  resolveTaskSession,
+  sessionDir,
+  withExistingMailboxSession,
+} from '../../session-manager.js';
 import { registerResource } from '../crud.js';
 import { appendRunLog, deleteRunLog } from '../../modules/scheduling/run-log.js';
 import { formatTasksTable } from '../format-tasks.js';
@@ -408,6 +414,123 @@ async function runTaskCommand(args: Record<string, unknown>, ctx: CallerContext)
   throw new Error(`task not found: ${id}`);
 }
 
+/**
+ * `ncl tasks migrate-legacy` — nanocoai/nanoclaw#3301.
+ *
+ * Since #2988 (one-door task delivery, 2.1.48) a `kind='task'` row is only
+ * safe inside its own `system:tasks:<series>` session (`resolveTaskSession`).
+ * A row that fires inside a chat session instead switches the WHOLE batch
+ * into task mode: inline `<message to>` blocks go inert, replies leave as
+ * `task_log` rows the host can't deliver, and the series is invisible to
+ * `ncl tasks list/get/cancel` (those only fan out over `findTaskSessions`,
+ * i.e. `system:tasks:*` threads). Series created before 2.1.48 are stuck in
+ * chat sessions permanently since nothing ever moves a live task row once
+ * written. This walks every non-task-session live task row for the target
+ * scope and re-homes it into its proper task session.
+ *
+ * One row per series is expected (`listLiveTasks` already collapses each
+ * series to its next-due occurrence), so id collisions across sessions are
+ * not a concern. Insert-then-delete order is deliberate: if the delete of
+ * the original ever fails, the result is a harmless leftover duplicate this
+ * command's own next run will catch and remove (a later pass finds it as a
+ * live task in a non-task session with the same series — still a valid
+ * source row), never a lost task. --dry-run reports what would move.
+ */
+async function migrateLegacyTasksCommand(
+  args: Record<string, unknown>,
+  ctx: CallerContext,
+): Promise<{
+  dry_run: boolean;
+  moved: number;
+  stuck: number;
+  details: Array<{
+    series_id: string;
+    row_id: string;
+    agent_group_id: string;
+    from_session: string;
+    to_session: string;
+  }>;
+  failures: Array<{ series_id: string; row_id: string; session_id: string; error: string }>;
+}> {
+  const dryRun = bool(args.dry_run);
+  const group = groupArg(args, ctx);
+
+  const candidateSessions = group ? await getSessionsByAgentGroup(group) : await getActiveSessions();
+  const legacySessions = candidateSessions.filter((s) => s.status === 'active' && !isTaskThread(s.thread_id));
+
+  const details: Array<{
+    series_id: string;
+    row_id: string;
+    agent_group_id: string;
+    from_session: string;
+    to_session: string;
+  }> = [];
+  const failures: Array<{ series_id: string; row_id: string; session_id: string; error: string }> = [];
+
+  for (const session of legacySessions) {
+    const scoped: ScopedSession = { id: session.id, agent_group_id: session.agent_group_id };
+    const rows = (await withInbound(scoped, (db) => selectLiveTasks(db))) ?? [];
+
+    for (const row of rows) {
+      const seriesId = row.seriesId ?? row.id;
+
+      if (dryRun) {
+        details.push({
+          series_id: seriesId,
+          row_id: row.id,
+          agent_group_id: session.agent_group_id,
+          from_session: session.id,
+          to_session: taskThreadId(seriesId),
+        });
+        continue;
+      }
+
+      try {
+        const { session: target } = await resolveTaskSession(session.agent_group_id, seriesId);
+        await withInbound({ id: target.id, agent_group_id: session.agent_group_id }, (db) =>
+          db.insertTask({
+            id: row.id,
+            seriesId,
+            processAfter: row.processAfter,
+            recurrence: row.recurrence,
+            content: row.content,
+            status: row.status === 'paused' ? 'paused' : 'pending',
+          }),
+        );
+
+        try {
+          await withInbound(scoped, (db) => db.deleteTask(row.id));
+        } catch (err) {
+          failures.push({
+            series_id: seriesId,
+            row_id: row.id,
+            session_id: session.id,
+            error: `moved to ${target.id} but failed to remove the original — duplicate live row, cancel the copy in ${session.id} manually: ${err instanceof Error ? err.message : String(err)}`,
+          });
+          continue;
+        }
+
+        details.push({
+          series_id: seriesId,
+          row_id: row.id,
+          agent_group_id: session.agent_group_id,
+          from_session: session.id,
+          to_session: target.id,
+        });
+      } catch (err) {
+        failures.push({
+          series_id: seriesId,
+          row_id: row.id,
+          session_id: session.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+
+  return { dry_run: dryRun, moved: details.length, stuck: failures.length, details, failures };
+}
+
 registerResource({
   name: 'task',
   plural: 'tasks',
@@ -659,6 +782,22 @@ registerResource({
         { name: 'session', type: 'string', description: 'Limit to one task session id.' },
       ],
       handler: async (args, ctx) => deleteTaskCommand(args, ctx),
+    },
+    'migrate-legacy': {
+      access: 'open',
+      description:
+        `Move live task rows out of chat sessions and into their own system:tasks:<series> session — nanocoai/nanoclaw#3301.\n\n` +
+        `A task row that fires inside a chat session (a pre-2.1.48 series, or any row a bug wrote there) puts the whole batch into one-door task mode: chat replies are dropped as undeliverable, its run log silently stops recording, and it is invisible to tasks list/get/cancel. This finds every such row in scope and moves it to a dedicated task session where it belongs. Safe to re-run — a series already in its own task session is left alone. Use --dry-run first to see what would move.`,
+      args: [
+        {
+          name: 'group',
+          type: 'string',
+          description:
+            'Agent group id (host callers; auto-filled to your own group inside a container). Omit on the host to scan every group.',
+        },
+        { name: 'dry_run', type: 'boolean', description: 'Report what would move without changing anything.' },
+      ],
+      handler: async (args, ctx) => migrateLegacyTasksCommand(args, ctx),
     },
   },
 });

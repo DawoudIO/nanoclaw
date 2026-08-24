@@ -291,14 +291,22 @@ export async function run(args: string[]): Promise<void> {
       null,
       parsed.sessionMode as 'shared' | 'per-thread' | 'agent-shared',
     );
+    // kind: 'chat', not 'task' — this is a one-shot instruction delivered
+    // into a chat session, not a scheduled series. Writing it as a task row
+    // switched the session's very first query into one-door task mode: inline
+    // <message to> blocks went inert and replies were dropped as task_log rows
+    // the host can't deliver (see nanocoai/nanoclaw#3301, "Related, but not
+    // blocking" section — this is that closing fix).
     await writeSessionMessage(agentGroup.id, session.id, {
       id: generateId('onboard'),
-      kind: 'task',
+      kind: 'chat',
       timestamp: new Date().toISOString(),
       platformId: parsed.platformId,
       channelType: parsed.channel,
       content: JSON.stringify({
-        prompt: `A new ${parsed.channel} channel has been connected. Run /welcome to introduce yourself to the user.`,
+        text: `A new ${parsed.channel} channel has been connected. Run /welcome to introduce yourself to the user.`,
+        sender: 'system',
+        senderId: 'system',
       }),
     });
     log.info('Onboarding message written', { sessionId: session.id, channel: parsed.channel });
