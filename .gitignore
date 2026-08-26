@@ -51,3 +51,12 @@ AGENTS.md
 docs/maintainer-guide.md
 docs/drafts/
 forks.md
+
+# Local agent-template library. Upstream ships templates/ empty (+ README) and
+# resolves --template refs from it at stamp time; the templates themselves are
+# maintained in their own repo (DawoudIO/nanoclaw-community-agents) and copied
+# in per-install. Vendoring them here means every upstream merge conflicts on
+# 7k lines of content, and the copy silently drifts from its source — which it
+# already did, within hours.
+/templates/*
+!/templates/README.md
