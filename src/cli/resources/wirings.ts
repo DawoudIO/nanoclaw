@@ -165,7 +165,7 @@ registerResource({
   },
   customOperations: {
     create: {
-      access: 'free',
+      access: 'approval',
       description:
         'Wire a messaging group to an agent group. Identify the messaging group by --messaging-group-id OR --channel-type + --platform-id (+ --instance); identify the agent by --agent-group-id OR --agent-group <folder>. Idempotent on (messaging group, agent group). Engagement flags: --engage-mode, --engage-pattern, --session-mode, --sender-scope, --ignored-message-policy, --threads, --priority. Omitted engage flags default from the channel adapter declaration.',
       handler: async (args) => {

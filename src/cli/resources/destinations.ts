@@ -93,7 +93,7 @@ registerResource({
       },
     },
     add: {
-      access: 'free',
+      access: 'approval',
       description: 'Add a destination for an agent. Use --agent-group-id, --local-name, --target-type, --target-id.',
       handler: async (args) => {
         const agentGroupId = args.agent_group_id as string;

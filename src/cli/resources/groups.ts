@@ -105,7 +105,7 @@ registerResource({
   operations: { list: 'open', get: 'open', update: 'approval' },
   customOperations: {
     create: {
-      access: 'free',
+      access: 'approval',
       description:
         'Create (or return the existing) agent group with its container config. Idempotent on --folder (bare creates only; --folder cannot be combined with --template). ' +
         'With --template <ref>, stamp from a local agent plugin under templates/ (skills + MCP servers ' +
@@ -292,7 +292,7 @@ registerResource({
       },
     },
     restart: {
-      access: 'free',
+      access: 'approval',
       description:
         'Restart containers for a group. Use --id <group-id> [--rebuild] [--message <text>]. ' +
         'From inside a container, --id is auto-filled and only the calling session is restarted. ' +
