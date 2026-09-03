@@ -28,7 +28,11 @@ vi.mock('../../container-restart.js', () => ({
 
 vi.mock('../../config.js', async () => {
   const actual = await vi.importActual('../../config.js');
-  return { ...actual, DATA_DIR: '/tmp/nanoclaw-test-cli-groups' };
+  return {
+    ...actual,
+    DATA_DIR: '/tmp/nanoclaw-test-cli-groups',
+    MOUNT_ALLOWLIST_PATH: '/tmp/nanoclaw-test-cli-groups/mount-allowlist.json',
+  };
 });
 
 const TEST_DIR = '/tmp/nanoclaw-test-cli-groups';
@@ -268,9 +272,18 @@ describe('groups CLI delete cascades dependent rows (#2525)', () => {
 });
 
 describe('groups config add-mount / remove-mount (host-only)', () => {
+  const HOST_DIR = `${TEST_DIR}/gmail-mcp-data`;
+
   beforeEach(async () => {
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
-    fs.mkdirSync(TEST_DIR, { recursive: true });
+    fs.mkdirSync(HOST_DIR, { recursive: true });
+    // A real allowlist, scoped to this test's own host dir — validateMount
+    // (now called at add-mount time, not just at container-spawn time) needs
+    // one to allow anything at all.
+    fs.writeFileSync(
+      `${TEST_DIR}/mount-allowlist.json`,
+      JSON.stringify({ allowedRoots: [{ path: HOST_DIR, allowReadWrite: true }], blockedPatterns: [] }),
+    );
     await runMigrations(await initTestDb());
   });
   afterEach(async () => {
@@ -282,12 +295,12 @@ describe('groups config add-mount / remove-mount (host-only)', () => {
     const GID = 'ag-mount';
     await createAgentGroup({ id: GID, name: 'm', folder: 'm', agent_provider: null, created_at: now() });
     await ensureContainerConfig(GID);
-    const args = { id: GID, host: '/data/.gmail-mcp', container: '/home/node/.gmail-mcp', ro: true };
+    const args = { id: GID, host: HOST_DIR, container: 'gmail-mcp', ro: true };
 
     const add = await dispatch({ id: 'r1', command: 'groups-config-add-mount', args }, { caller: 'host' });
     expect(add.ok).toBe(true);
     expect(JSON.parse((await getContainerConfig(GID))!.additional_mounts)).toEqual([
-      { hostPath: '/data/.gmail-mcp', containerPath: '/home/node/.gmail-mcp', readonly: true },
+      { hostPath: HOST_DIR, containerPath: 'gmail-mcp', readonly: true },
     ]);
 
     // idempotent: a second add does not duplicate
@@ -298,11 +311,28 @@ describe('groups config add-mount / remove-mount (host-only)', () => {
       {
         id: 'r3',
         command: 'groups-config-remove-mount',
-        args: { id: GID, host: '/data/.gmail-mcp', container: '/home/node/.gmail-mcp' },
+        args: { id: GID, host: HOST_DIR, container: 'gmail-mcp' },
       },
       { caller: 'host' },
     );
     expect(rm.ok).toBe(true);
+    expect(JSON.parse((await getContainerConfig(GID))!.additional_mounts)).toEqual([]);
+  });
+
+  // Regression: an absolute --container silently produced a mount that was
+  // accepted here, stored in container.json, but then dropped at
+  // container-spawn time (validateAdditionalMounts) with only a host-side
+  // log.warn — no error ever reached the caller. add-mount must reject it
+  // immediately instead, at the point where it's still cheap to fix.
+  it('rejects an absolute --container path instead of silently storing a mount that will never work', async () => {
+    const GID = 'ag-mount-abs';
+    await createAgentGroup({ id: GID, name: 'm2', folder: 'm2', agent_provider: null, created_at: now() });
+    await ensureContainerConfig(GID);
+    const args = { id: GID, host: HOST_DIR, container: '/workspace/shared-repos' };
+
+    const add = await dispatch({ id: 'r1', command: 'groups-config-add-mount', args }, { caller: 'host' });
+    expect(add.ok).toBe(false);
+    expect((add as { ok: false; error: { message: string } }).error.message).toMatch(/relative/i);
     expect(JSON.parse((await getContainerConfig(GID))!.additional_mounts)).toEqual([]);
   });
 });

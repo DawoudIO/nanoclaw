@@ -21,6 +21,7 @@ import {
 import { getSessionDriver } from '../../drivers/index.js';
 import { assertValidGroupFolder, groupFolderExistsOnDisk } from '../../group-folder.js';
 import { initGroupFilesystem } from '../../group-init.js';
+import { validateMount } from '../../modules/mount-security/index.js';
 import { createAgentFromTemplate } from '../../templates/create-agent.js';
 import {
   formatRestampResult,
@@ -558,7 +559,9 @@ registerResource({
       description:
         "Mount a host directory into a group's containers. OPERATOR-ONLY — never runnable from " +
         'inside a container (mounting host paths is a filesystem-access boundary). Requires ' +
-        '`ncl groups restart` to take effect. Use --id <group-id> --host <host-path> --container <container-path> [--ro].',
+        '`ncl groups restart` to take effect. --container is a RELATIVE name (e.g. "shared-repos") ' +
+        'nested under a fixed /workspace/extra/ prefix — never an absolute path. ' +
+        'Use --id <group-id> --host <host-path> --container <container-path> [--ro].',
       handler: async (args) => {
         const id = args.id as string;
         if (!id) throw new Error('--id is required');
@@ -566,14 +569,28 @@ registerResource({
         const containerPath = (args.container ?? args['container-path']) as string | undefined;
         if (!hostPath || !containerPath) throw new Error('Provide --host <host-path> and --container <container-path>');
 
-        const row = await getContainerConfig(id);
-        if (!row) throw new Error(`No container config for group: ${id}`);
-
         const mount: AdditionalMountConfig = {
           hostPath,
           containerPath,
           ...(args.ro || args.readonly ? { readonly: true } : {}),
         };
+
+        // validateMount is the SAME check container-spawn time runs
+        // (validateAdditionalMounts, called from container-runner.ts) — an
+        // invalid mount (bad allowlist root, absolute --container, ".."
+        // traversal, blocked path) fails there too, but silently: it's
+        // dropped from the real mount list with only a host-side log.warn,
+        // never surfacing to this command's response, `ncl groups get`, or
+        // `ncl groups restart`. Running the identical check here means a
+        // bad config is rejected the moment it's created, not discovered
+        // later as "the mount just isn't there."
+        const validation = validateMount(mount);
+        if (!validation.allowed) {
+          throw new Error(`Mount would be rejected at container-spawn time: ${validation.reason}`);
+        }
+
+        const row = await getContainerConfig(id);
+        if (!row) throw new Error(`No container config for group: ${id}`);
         const existing = JSON.parse(row.additional_mounts) as AdditionalMountConfig[];
         if (!existing.some((m) => m.hostPath === hostPath && m.containerPath === containerPath)) {
           existing.push(mount);
