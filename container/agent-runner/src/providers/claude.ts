@@ -314,10 +314,57 @@ function archiveTranscriptFile(
     const filename = `${formatLocalStamp(new Date(), TIMEZONE).slice(0, 10)}-${name}.md`;
     fs.writeFileSync(path.join(conversationsDir, filename), formatTranscriptMarkdown(messages, summary, assistantName));
     log(`Archived conversation to ${filename}`);
+    pruneConversationsDir(conversationsDir);
     return true;
   } catch (err) {
     log(`Failed to archive transcript: ${err instanceof Error ? err.message : String(err)}`);
     return false;
+  }
+}
+
+/**
+ * Age cap for files in the conversations/ archive directory. Each archive
+ * write is a full re-serialization of the whole conversation, not
+ * incremental, and this directory otherwise has no cleanup of its own at
+ * all — unlike the .jsonl resume-transcript this function reads FROM, which
+ * already has real rotation (transcriptRotateAgeMs, below). A real install
+ * saw 264 files / 188MB in one day from this on one container, a strong
+ * candidate cause of an OOM crash loop it hit that day. Same override
+ * pattern as the transcript rotation knobs: 0/non-positive disables.
+ */
+function conversationArchiveMaxAgeMs(): number {
+  const raw = process.env.CONVERSATION_ARCHIVE_MAX_AGE_DAYS;
+  if (raw === undefined || raw.trim() === '') return 3 * 86_400_000;
+  const days = Number(raw);
+  if (!Number.isFinite(days)) return 3 * 86_400_000;
+  return days > 0 ? days * 86_400_000 : Infinity;
+}
+
+/**
+ * Delete conversations/ archive files past the age cap. Best-effort and
+ * silent on any single-file failure — a stray unremovable file must never
+ * fail the archive write that just succeeded above it.
+ */
+function pruneConversationsDir(conversationsDir: string): void {
+  const maxAgeMs = conversationArchiveMaxAgeMs();
+  if (!Number.isFinite(maxAgeMs)) return;
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(conversationsDir);
+  } catch {
+    return;
+  }
+  const cutoff = Date.now() - maxAgeMs;
+  for (const entry of entries) {
+    const entryPath = path.join(conversationsDir, entry);
+    try {
+      const stat = fs.statSync(entryPath);
+      if (stat.isFile() && stat.mtimeMs < cutoff) {
+        fs.unlinkSync(entryPath);
+      }
+    } catch {
+      /* best-effort: one bad entry must not block the rest */
+    }
   }
 }
 
