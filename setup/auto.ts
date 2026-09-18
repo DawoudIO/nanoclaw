@@ -1754,9 +1754,11 @@ async function runCustomEndpointAuth(baseUrl: string, token: string): Promise<vo
   writeEnvLine('ANTHROPIC_BASE_URL', baseUrl);
 
   // Register the claude provider so the runtime passes ANTHROPIC_BASE_URL
-  // and the placeholder bearer into the container. Only appended when the
-  // user has configured a custom endpoint; standard installs don't load
-  // the file at all.
+  // and the placeholder bearer into the container. src/providers/index.ts
+  // now imports claude.js unconditionally (it also forwards the Claude
+  // Code compact/rotation overrides on every install), so this call is
+  // normally a no-op here — appendProviderImport is idempotent and only
+  // still matters for an older checkout whose barrel predates that change.
   appendProviderImport('./claude.js');
 }
 
