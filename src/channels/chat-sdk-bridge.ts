@@ -372,6 +372,13 @@ export interface ChatSdkBridgeConfig {
    * and reactions still target the head of the reply.
    */
   maxTextLength?: number;
+
+  /**
+   * For adapters whose attachments carry a public `url` but no `fetchData()`
+   * (Discord's CDN links are pre-signed). When set, the bridge downloads the
+   * https url itself so the bytes still reach the inbox.
+   */
+  fetchAttachmentUrls?: boolean;
 }
 
 /**
@@ -512,9 +519,16 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           width: (att as unknown as Record<string, unknown>).width,
           height: (att as unknown as Record<string, unknown>).height,
         };
-        if (att.fetchData) {
+        if (att.fetchData || (config.fetchAttachmentUrls && att.url?.startsWith('https://'))) {
           try {
-            const buffer = await att.fetchData();
+            let buffer: Buffer;
+            if (att.fetchData) {
+              buffer = await att.fetchData();
+            } else {
+              const res = await fetch(att.url!, { signal: AbortSignal.timeout(30_000) });
+              if (!res.ok) throw new Error(`HTTP ${res.status}`);
+              buffer = Buffer.from(await res.arrayBuffer());
+            }
             entry.data = buffer.toString('base64');
           } catch (err) {
             log.warn('Failed to download attachment', { type: att.type, err });

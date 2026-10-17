@@ -46,7 +46,7 @@ function destinationList(): string {
  * came from that channel, else that channel's latest inbound thread. An agent
  * destination never carries a thread.
  */
-function resolveRouting(
+export function resolveRouting(
   to: string,
 ): { channel_type: string; platform_id: string; thread_id: string | null; resolvedName: string } | { error: string } {
   const dest = findByName(to);

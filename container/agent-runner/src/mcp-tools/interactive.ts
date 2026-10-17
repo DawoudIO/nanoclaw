@@ -11,6 +11,7 @@ import { findQuestionResponse, markCompleted } from '../db/messages-in.js';
 import { writeMessageOut } from '../db/messages-out.js';
 import { getSessionRouting, resolveDestinationThread } from '../db/session-routing.js';
 import { getCurrentReplyRoute } from '../db/session-state.js';
+import { resolveRouting } from './core.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 
@@ -212,7 +213,7 @@ export const askUserQuestion: McpToolDefinition = {
 export const sendCard: McpToolDefinition = {
   tool: {
     name: 'send_card',
-    description: 'Send a display card with optional URL link buttons to the current conversation.',
+    description: 'Send a display card with optional URL link buttons to the current conversation, or to a named destination via `to`.',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -244,6 +245,10 @@ export const sendCard: McpToolDefinition = {
             },
           },
         },
+        to: {
+          type: 'string',
+          description: 'Destination name. Defaults to the current conversation.',
+        },
         fallbackText: {
           type: 'string',
           description:
@@ -258,7 +263,10 @@ export const sendCard: McpToolDefinition = {
     if (!card) return err('card is required');
 
     const id = generateId();
-    const r = routing();
+    const to = args.to as string | undefined;
+    const dest = to ? resolveRouting(to) : null;
+    if (dest && 'error' in dest) return err(dest.error);
+    const r = dest ?? routing();
     const { card: renderable, dropped } = partitionActions(card);
 
     await writeMessageOut({
